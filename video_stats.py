@@ -1,15 +1,14 @@
 import requests
 import json
-
 import os
 from dotenv import load_dotenv
-
 import itertools
+from datetime import date
 
 load_dotenv(dotenv_path="./.env")
 
 API_KEY = os.getenv("YOUTUBE_API_KEY")
-CHANNEL_HANDLE = "tseries"
+CHANNEL_HANDLE = os.getenv("YOUTUBE_CHANNEL_HANDLE")
 MAX_RESULTS_PER_PAGE = 50
 
 def get_channel_playlist_id():
@@ -50,9 +49,9 @@ def get_video_ids(playlist_id):
 
             for item in data.get("items", []):
                 video_ids.append(item["contentDetails"]["videoId"])
-            # for i in range(current_page_count):
-            #     video_ids.append(data["items"][i]["contentDetails"]['videoId'])
-            print(f"Fetched {len(video_ids)} videos so far...")
+            
+            if len(video_ids) % 1000 == 0:
+                print(f"Fetched {len(video_ids)} videos so far...")
 
             if 'nextPageToken' in data:
                 next_page_token = data['nextPageToken']
@@ -68,6 +67,7 @@ def get_video_ids(playlist_id):
 def get_video_stats(video_ids):
     try:
         extracted_data = []
+
         for batch in itertools.batched(video_ids, MAX_RESULTS_PER_PAGE):
             # Join the batch of 50 into a single comma-separated string for the API
             comma_separated_ids = ",".join(batch)
@@ -95,7 +95,8 @@ def get_video_stats(video_ids):
                 }
                 extracted_data.append(video_data)
 
-            print(f"Fetched {len(extracted_data)} video stats so far...")   
+            if(len(extracted_data) % 1000 == 0):
+                print(f"Fetched {len(extracted_data)} video stats so far...")   
         
         print(len(extracted_data))
         return extracted_data
@@ -103,7 +104,20 @@ def get_video_stats(video_ids):
     except requests.exceptions.RequestException as e:
         raise e
     
+def save_to_json(extracted_data):
+    file_path = f"./data/YT_data_{date.today()}.json"
+
+    try:
+        with open(file_path, "w", encoding="utf-8") as json_outfile:
+            json.dump(extracted_data, json_outfile, ensure_ascii=False, indent=4)
+        print(f"Success! Data saved to: {file_path}")    
+        
+    except requests.exceptions.RequestException as e:
+        print("Something went wrong with the network request!")
+        raise e
+    
 if __name__ == "__main__":
     playlist_id = get_channel_playlist_id()
     video_ids = get_video_ids(playlist_id)
     video_stats = get_video_stats(video_ids)
+    save_to_json(video_stats)
