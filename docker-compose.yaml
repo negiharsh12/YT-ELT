@@ -44,11 +44,11 @@ x-airflow-common:
   # Custom image (built from ./dockerfile, pushed to Docker Hub). Tags from .env:
   #   DOCKERHUB_NAMESPACE / DOCKERHUB_REPOSITORY / IMAGE_TAG
   &airflow-common
-  image: ${DOCKERHUB_NAMESPACE}/${DOCKERHUB_REPOSITORY}:${IMAGE_TAG}
+  image: ${DOCKERHUB_NAMESPACE}/${DOCKERHUB_REPOSITORY}:latest
 
   # Load secrets and connection strings from project root .env
-  env_file:
-    - .env
+  # env_file:
+  #   - .env
 
   environment:
 
@@ -136,11 +136,22 @@ services:
   postgres:
     container_name: postgres
     image: postgres:13
-    env_file:
-      - .env
+    # env_file:
+    #   - .env
     environment:
       - POSTGRES_USER=${POSTGRES_CONN_USERNAME}
       - POSTGRES_PASSWORD=${POSTGRES_CONN_PASSWORD}
+      - METADATA_DATABASE_NAME=${METADATA_DATABASE_NAME}
+      - METADATA_DATABASE_USERNAME=${METADATA_DATABASE_USERNAME}
+      - METADATA_DATABASE_PASSWORD=${METADATA_DATABASE_PASSWORD}
+      - ELT_DATABASE_NAME=${ELT_DATABASE_NAME}
+      - ELT_DATABASE_USERNAME=${ELT_DATABASE_USERNAME}
+      - ELT_DATABASE_PASSWORD=${ELT_DATABASE_PASSWORD}
+      - CELERY_BACKEND_NAME=${CELERY_BACKEND_NAME}
+      - CELERY_BACKEND_USERNAME=${CELERY_BACKEND_USERNAME}
+      - CELERY_BACKEND_PASSWORD=${CELERY_BACKEND_PASSWORD}
+      - POSTGRES_CONN_HOST=${POSTGRES_CONN_HOST}
+      - POSTGRES_CONN_PORT=${POSTGRES_CONN_PORT}
     ports:
       - 5432:5432 # exposed to host (tools on your machine can connect)
     volumes:
