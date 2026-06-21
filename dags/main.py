@@ -77,7 +77,7 @@ with DAG(
     update_snapshot_table >> update_transform_table >> trigger_yt_data_quality_check_DAG
 
 with DAG(
-    dag_id = "yt_data_quality_check",
+    dag_id = "yt_data_quality_checks",
     default_args = default_args,
     description = "DAG to perform data quality checks on Snapshot and Transform layers using Soda",
     # schedule=CronTriggerTimetable("30 1 * * *", timezone=local_tz),
