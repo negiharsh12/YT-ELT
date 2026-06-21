@@ -49,9 +49,10 @@ jobs:
       runs-on: ubuntu-latest
       needs: build-and-push-images
       env: 
+        YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+        YOUTUBE_CHANNEL_HANDLE: ${{ vars.YOUTUBE_CHANNEL_HANDLE }}
         AIRFLOW_WWW_USER_PASSWORD: ${{ secrets.AIRFLOW_WWW_USER_PASSWORD }}
         AIRFLOW_WWW_USER_USERNAME: ${{ secrets.AIRFLOW_WWW_USER_USERNAME }}
-        API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
         CELERY_BACKEND_NAME: ${{ vars.CELERY_BACKEND_NAME }}
         CELERY_BACKEND_PASSWORD: ${{ secrets.CELERY_BACKEND_PASSWORD }}
         CELERY_BACKEND_USERNAME: ${{ vars.CELERY_BACKEND_USERNAME }}
@@ -70,7 +71,6 @@ jobs:
         POSTGRES_CONN_PORT: ${{ secrets.POSTGRES_CONN_PORT }}
         POSTGRES_CONN_USERNAME: ${{ secrets.POSTGRES_CONN_USERNAME }}
         AIRFLOW_UID: ${{ vars.AIRFLOW_UID }}
-        CHANNEL_HANDLE: ${{ vars.YOUTUBE_CHANNEL_HANDLE }}
         DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE }}
         DOCKERHUB_REPOSITORY: ${{ vars.DOCKERHUB_REPOSITORY }}
         DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
@@ -96,7 +96,7 @@ jobs:
         - name: Run End-to-End tests
           if: steps.changed-files-tests.outputs.any_changed == 'true'
           run: |
-            DAG_NAMES=("fetch_yt_data_extract" "yt_load_to_postgres" "yt_data_quality_check")
+            DAG_NAMES=("fetch_yt_data_extract" "yt_load_to_postgres" "yt_data_quality_checks")
             for DAG in "${DAG_NAMES[@]}"; do 
               docker exec -t airflow-worker sh -c "airflow dags test $DAG"
             done
