@@ -1,0 +1,338 @@
+# =============================================================================
+# YT-ELT — local Airflow stack (Docker Compose)
+# =============================================================================
+#
+# PURPOSE
+#   Run Apache Airflow 3 locally to schedule your YouTube ELT DAGs.
+#   This file defines which containers run and how they talk to each other.
+#
+# ARCHITECTURE (read top to bottom)
+#
+#   [postgres]  — databases (Airflow metadata, Celery results, your ELT data)
+#   [redis]     — message queue between scheduler and workers
+#
+#   [airflow-init]         — one-shot: DB migrate + create admin user (then exits)
+#   [airflow-dag-processor]— reads /opt/airflow/dags and registers DAGs in DB
+#   [airflow-scheduler]    — decides when DAG runs should start
+#   [airflow-worker]       — executes task code (Celery)
+#   [airflow-webserver]    — UI + API at http://localhost:8080
+#
+#   Your code on disk is mounted into containers (see volumes under x-airflow-common).
+#
+# HOW TO READ THIS FILE
+#   • `x-airflow-common` — YAML anchor: shared settings reused by every Airflow service.
+#   • `<<: *airflow-common` — merge those shared settings into a service (copy/paste shortcut).
+#   • `${VAR}` — value comes from `.env` in this project folder.
+#   • `AIRFLOW__SECTION__KEY` — Airflow config override (double underscores = nested config).
+#
+# COMMON COMMANDS
+#   docker compose up -d              # start stack
+#   docker compose ps                 # see what is running
+#   docker compose logs <service>     # e.g. airflow-dag-processor
+#   docker compose down               # stop containers (volumes keep DB data)
+#
+# WARNING: Local development only. Production needs secrets management, backups,
+#          resource limits, monitoring, and a hardened image — not this file as-is.
+#
+# Docs: https://airflow.apache.org/docs/apache-airflow/stable/howto/docker-compose/
+# =============================================================================
+---
+# -----------------------------------------------------------------------------
+# Shared template for all Airflow containers (not a running service by itself)
+# -----------------------------------------------------------------------------
+x-airflow-common:
+  # Custom image (built from ./dockerfile, pushed to Docker Hub). Tags from .env:
+  #   DOCKERHUB_NAMESPACE / DOCKERHUB_REPOSITORY / IMAGE_TAG
+  &airflow-common
+  image: ${DOCKERHUB_NAMESPACE}/${DOCKERHUB_REPOSITORY}:${IMAGE_TAG}
+
+  # Load secrets and connection strings from project root .env
+  env_file:
+    - .env
+
+  environment:
+
+    # --- Core Airflow ---
+    # Who logs into the UI (FAB = Flask AppBuilder auth, default in many Airflow 3 setups)
+    &airflow-common-env
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    # CeleryExecutor = scheduler sends work to worker processes via Redis
+    AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+    # Encrypts connections/variables in the metadata DB; must stay stable once set
+    AIRFLOW__CORE__FERNET_KEY: ${FERNET_KEY}
+    # New DAGs show up paused until you unpause them in the UI
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    # Do not load Apache example DAGs
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false' # Airflow 3: MUST be identical on webserver, scheduler, worker, dag-processor
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET}
+
+    # --- Metadata database (Postgres) ---
+    # Stores DAG definitions, run history, task state, variables, connections
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${METADATA_DATABASE_USERNAME}:${METADATA_DATABASE_PASSWORD}@${POSTGRES_CONN_HOST}:${POSTGRES_CONN_PORT}/${METADATA_DATABASE_NAME}
+
+    # --- Airflow 3 API / UI ---
+    # Other components call the webserver container for the REST API
+    AIRFLOW__API__REST_API_URL: http://airflow-webserver:8080
+    AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+
+    # --- Celery (distributed task execution) ---
+    # Where workers store task return values
+    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://${CELERY_BACKEND_USERNAME}:${CELERY_BACKEND_PASSWORD}@${POSTGRES_CONN_HOST}:${POSTGRES_CONN_PORT}/${CELERY_BACKEND_NAME}
+    # Redis URL: host `redis` = Docker service name on the internal network
+    AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
+
+    # --- Scheduler / DAG parsing (Airflow 3) ---
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    # Tells scheduler: DAG parsing happens in airflow-dag-processor, not here
+    AIRFLOW__SCHEDULER__STANDALONE_DAG_PROCESSOR: 'true' # Airflow 3: workers/schedulers call this to start tasks (NOT localhost)
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-webserver:8080/execution/'
+
+    # --- Connections & variables (injected from .env) ---
+    # Pattern: AIRFLOW_CONN_<CONN_ID>  →  Variable.get / Connection.get in DAG code
+    # Pattern: AIRFLOW_VAR_<NAME>      →  Variable.get("NAME") in DAG code
+    # These often do NOT appear in the UI list; they still work at runtime.
+    AIRFLOW_CONN_POSTGRES_DB_YT_ELT: 'postgresql://${ELT_DATABASE_USERNAME}:${ELT_DATABASE_PASSWORD}@${POSTGRES_CONN_HOST}:${POSTGRES_CONN_PORT}/${ELT_DATABASE_NAME}'
+    AIRFLOW_VAR_YOUTUBE_API_KEY: ${YOUTUBE_API_KEY}
+    AIRFLOW_VAR_YOUTUBE_CHANNEL_HANDLE: ${YOUTUBE_CHANNEL_HANDLE}
+
+    # Plain env vars for tests/scripts (not Airflow-specific naming)
+    ELT_DATABASE_NAME: ${ELT_DATABASE_NAME}
+    ELT_DATABASE_USERNAME: ${ELT_DATABASE_USERNAME}
+    ELT_DATABASE_PASSWORD: ${ELT_DATABASE_PASSWORD}
+    POSTGRES_CONN_HOST: ${POSTGRES_CONN_HOST}
+    POSTGRES_CONN_PORT: ${POSTGRES_CONN_PORT}
+
+  # Host folder → path inside container (edit DAGs on host, Airflow sees them in container)
+  volumes:
+    - ./config:/opt/airflow/config
+    - ./dags:/opt/airflow/dags # your DAGs + api/ helpers
+    - ./data:/opt/airflow/data # JSON output from save_to_json
+    - ./include:/opt/airflow/include
+    - ./logs:/opt/airflow/logs # task + dag-processor logs (check here when debugging)
+    - ./plugins:/opt/airflow/plugins
+    - ./tests:/opt/airflow/tests
+
+  # Linux: match host user so logs/dags are not owned by root. Set AIRFLOW_UID in .env.
+  user: "${AIRFLOW_UID}:0"
+
+  # Wait until Postgres and Redis pass healthcheck before starting Airflow services
+  depends_on: &airflow-common-depends-on
+    redis:
+      condition: service_healthy
+    postgres:
+      condition: service_healthy
+
+# -----------------------------------------------------------------------------
+# Running services
+# -----------------------------------------------------------------------------
+services:
+
+  # ---------------------------------------------------------------------------
+  # Postgres — three logical databases (created by init script on first boot)
+  #   • airflow_metadata_db — Airflow internal state
+  #   • celery_results_db   — Celery task results
+  #   • elt_db              — your pipeline destination (optional use)
+  # ---------------------------------------------------------------------------
+  postgres:
+    container_name: postgres
+    image: postgres:13
+    env_file:
+      - .env
+    environment:
+      - POSTGRES_USER=${POSTGRES_CONN_USERNAME}
+      - POSTGRES_PASSWORD=${POSTGRES_CONN_PASSWORD}
+    ports:
+      - 5432:5432 # exposed to host (tools on your machine can connect)
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+      - ./docker/postgres/init-multiple-databases.sh:/docker-entrypoint-initdb.d/init-multiple-databases.sh
+    healthcheck:
+      test: [ "CMD", "pg_isready", "-U", "${POSTGRES_CONN_USERNAME}", "-d", "${METADATA_DATABASE_NAME}" ]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  # ---------------------------------------------------------------------------
+  # Redis — Celery broker (task queue). Not exposed on host; only internal network.
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7.2-bookworm
+    container_name: redis
+    expose:
+      - 6379
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 30s
+      retries: 50
+      start_period: 30s
+    restart: always
+
+  # ---------------------------------------------------------------------------
+  # Airflow webserver — Airflow 3 "api-server" (UI at http://localhost:8080)
+  # ---------------------------------------------------------------------------
+  airflow-webserver:
+    <<: *airflow-common
+    command: api-server
+    container_name: airflow-webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: [ "CMD", "curl", "--fail", "http://localhost:8080/ui/" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # ---------------------------------------------------------------------------
+  # Scheduler — creates DAG runs when schedule says so; does NOT parse DAG files
+  # ---------------------------------------------------------------------------
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    container_name: airflow-scheduler
+    healthcheck:
+      test: [ "CMD", "curl", "--fail", "http://localhost:8974/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # ---------------------------------------------------------------------------
+  # DAG processor — REQUIRED in Airflow 3: scans dags/, imports Python, writes to DB
+  # If this container is down, UI and `airflow dags list` stay empty.
+  # Debug: ./logs/dag_processor/<date>/dags-folder/main.py.log
+  # ---------------------------------------------------------------------------
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    container_name: airflow-dag-processor
+    healthcheck:
+      test: [ "CMD-SHELL", 'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"' ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # ---------------------------------------------------------------------------
+  # Celery worker — runs @task functions from your DAGs
+  # ---------------------------------------------------------------------------
+  airflow-worker:
+    <<: *airflow-common
+    command: celery worker
+    container_name: airflow-worker
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - 'celery --app airflow.providers.celery.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}" || celery --app airflow.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}"'
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    environment:
+      <<: *airflow-common-env
+      # Lets Celery worker shut down cleanly when container stops
+      DUMB_INIT_SETSID: "0"
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # ---------------------------------------------------------------------------
+  # Init — runs once per `compose up`: checks resources, migrates DB, creates admin
+  # Exits when done; other services wait for `service_completed_successfully`.
+  # ---------------------------------------------------------------------------
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    container_name: airflow-init
+    command:
+      - -c
+      - |
+        if [[ -z "${AIRFLOW_UID}" ]]; then
+          echo
+          echo -e "\033[1;33mWARNING!!!: AIRFLOW_UID not set!\e[0m"
+          echo "If you are on Linux, you SHOULD follow the instructions below to set "
+          echo "AIRFLOW_UID environment variable, otherwise files will be owned by root."
+          echo "For other operating systems you can get rid of the warning with manually created .env file:"
+          echo "    See: https://airflow.apache.org/docs/apache-airflow/stable/howto/docker-compose/index.html#setting-the-right-airflow-user"
+          echo
+        fi
+        one_meg=1048576
+        mem_available=$$(($$(getconf _PHYS_PAGES) * $$(getconf PAGE_SIZE) / one_meg))
+        cpus_available=$$(grep -cE 'cpu[0-9]+' /proc/stat)
+        disk_available=$$(df / | tail -1 | awk '{print $$4}')
+        warning_resources="false"
+        if (( mem_available < 4000 )) ; then
+          echo
+          echo -e "\033[1;33mWARNING!!!: Not enough memory available for Docker.\e[0m"
+          echo "At least 4GB of memory required. You have $$(numfmt --to iec $$((mem_available * one_meg)))"
+          echo
+          warning_resources="true"
+        fi
+        if (( cpus_available < 2 )); then
+          echo
+          echo -e "\033[1;33mWARNING!!!: Not enough CPUS available for Docker.\e[0m"
+          echo "At least 2 CPUs recommended. You have $${cpus_available}"
+          echo
+          warning_resources="true"
+        fi
+        if (( disk_available < one_meg * 10 )); then
+          echo
+          echo -e "\033[1;33mWARNING!!!: Not enough Disk space available for Docker.\e[0m"
+          echo "At least 10 GBs recommended. You have $$(numfmt --to iec $$((disk_available * 1024 )))"
+          echo
+          warning_resources="true"
+        fi
+        if [[ $${warning_resources} == "true" ]]; then
+          echo
+          echo -e "\033[1;33mWARNING!!!: You have not enough resources to run Airflow (see above)!\e[0m"
+          echo "Please follow the instructions to increase amount of resources available:"
+          echo "   https://airflow.apache.org/docs/apache-airflow/stable/howto/docker-compose/index.html#before-you-begin"
+          echo
+        fi
+        mkdir -p /sources/dags /sources/data /sources/include /sources/logs /sources/tests
+        chown -R "${AIRFLOW_UID}:0" /sources/{dags,data,include,logs,tests}
+        exec /entrypoint airflow db migrate && exec /entrypoint airflow users create --username "$${_AIRFLOW_WWW_USER_USERNAME}" --password "$${_AIRFLOW_WWW_USER_PASSWORD}" --role Admin --firstname Airflow --lastname Admin --email admin@example.com
+    environment:
+      <<: *airflow-common-env
+    user: "0:0"
+    volumes:
+      - .:/sources
+
+  # ---------------------------------------------------------------------------
+  # Optional debug shell — not started by default. Use:
+  #   docker compose --profile debug run --rm airflow-cli airflow dags list
+  # ---------------------------------------------------------------------------
+  airflow-cli:
+    <<: *airflow-common
+    profiles:
+      - debug
+    environment:
+      <<: *airflow-common-env
+      CONNECTION_CHECK_MAX_COUNT: "0"
+    command:
+      - bash
+      - -c
+      - airflow
+
+# Named volume: Postgres data survives `docker compose down` (until `docker volume rm`)
+volumes:
+  postgres-db-volume:

@@ -3,3 +3,4 @@ __pycache__/
 .env
 test_json_response.json
 logs/
+test_oops.py
